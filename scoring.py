@@ -42,20 +42,31 @@ def compute_score(readings):
     readings: dict of marker name -> value, e.g. {"hba1c": 5.2}
 
     Returns dict with the total score and the per-pillar breakdown.
+    Biomarkers are only scored if present and valid in readings,
+    preventing missing tests from receiving unearned points or zero penalties.
     """
     pillar_totals = {p: 0.0 for p in PILLAR_WEIGHTS}
     pillar_counts = {p: 0 for p in PILLAR_WEIGHTS}
 
     for marker, (pillar, low, high) in REFERENCE_RANGES.items():
-        value = readings.get(marker, 0)
+        if marker not in readings or readings[marker] is None:
+            continue
+        value = readings[marker]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if value < 0:
+            continue
         pillar_totals[pillar] += _marker_score(value, low, high)
         pillar_counts[pillar] += 1
 
     pillars = {}
     total = 0.0
     for pillar, weight in PILLAR_WEIGHTS.items():
-        ratio = pillar_totals[pillar] / pillar_counts[pillar]
-        points = ratio * weight
+        if pillar_counts[pillar] > 0:
+            ratio = pillar_totals[pillar] / pillar_counts[pillar]
+            points = ratio * weight
+        else:
+            points = 0.0
         pillars[pillar] = round(points, 1)
         total += points
 
