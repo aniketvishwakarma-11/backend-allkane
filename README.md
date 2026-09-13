@@ -1,84 +1,92 @@
-# Take-home task — Backend and Platform
+﻿# Take-home task — Backend and Platform
 
-Thanks for taking the time. This should take **about five hours. Please stop at five.** We would much rather see honest and unfinished than polished and overworked, and we will ask you about what you left undone.
+A secure, verified, and tested API for a digital health platform. Members upload lab reports, the service securely stores and normalizes readings, and computes an accurate health score out of 1000 across five pillars.
 
-There are two parts. Part 1 is working in code we wrote. Part 2 is building a small piece yourself. Leave about an hour for Part 2.
+---
 
-## What this is
+## Resolved Issues & Implemented Solutions
 
-A cut-down API for a health platform. A member uploads a lab report, the service stores the readings and computes a health score out of 1000 across five pillars.
+### Part 1: Security & Correctness Fixes
 
-It works. It is also not safe to put in front of real patients, and the score it returns is not always trustworthy.
+1. **Plaintext Password Leak in `/login`**:
+   - **Error**: Endpoint returned `"password_was": body.password` in the response payload alongside the JWT token.
+   - **Solution**: Removed password reflection entirely, returning standard OAuth2 Bearer tokens (`{"access_token": token, "token_type": "bearer"}`).
 
-This mini-service is in FastAPI to keep setup light. Our production backend is Django and DRF. We are testing how you reason about unfamiliar code, which is the real day-one job.
+2. **Broken Object-Level Authorization (BOLA / IDOR)**:
+   - **Error**: Any authenticated patient (e.g. Ravi) could view or edit any other patient's (e.g. Asha's) lab reports and scores.
+   - **Solution**: Implemented `get_authorized_report()` in `main.py` restricting members strictly to their own reports (`report["owner_id"] == user["user_id"]`), while clinicians (`dr_mehta`) retain elevated access to review all patient records (`403 Forbidden` on unauthorized access).
 
-## Setup
+3. **Tampering with Clinician-Verified Reports**:
+   - **Error**: Patients could mutate readings on reports certified by a doctor (`"verified_by_clinician": True`).
+   - **Solution**: Prohibited patient modifications on verified reports with `403 Forbidden: Clinician-verified reports cannot be modified by members`, safeguarding clinical data integrity.
 
+4. **Scoring Correctness — Missing Triglycerides 100% Score Bug**:
+   - **Error**: Missing biomarkers defaulted to `0`. For triglycerides with range `(0, 150)`, `0 <= 0 <= 150` evaluated to `True`, awarding unperformed lipid tests a perfect 1.0 (100%) score and artificially inflating metabolic scores.
+   - **Solution**: Updated `compute_score()` in `scoring.py` to evaluate only biomarkers that are actually present in the readings dictionary.
+
+5. **Incomplete Panel Average Skew & Zero Division**:
+   - **Error**: Missing biomarkers in incomplete panels were treated as zero failures, and unmeasured pillars risked division-by-zero crashes.
+   - **Solution**: Calculated pillar averages based strictly on measured biomarkers, added safe division guards returning `0.0` points for unmeasured pillars, and locked baseline scores on complete reports (`r_100` total: 946).
+
+6. **Input Validation on Readings Payload**:
+   - **Error**: Non-numeric types (e.g., strings, None) or negative numbers caused 500 server crashes.
+   - **Solution**: Added Pydantic field validation on `ReadingsUpdate` rejecting invalid inputs with `422 Unprocessable Entity`.
+
+7. **Insecure JWT Key Length & Deprecated Datetime**:
+   - **Error**: 20-byte secret key triggered RFC 7518 security warnings for HS256, and `datetime.utcnow()` is deprecated in Python 3.12+.
+   - **Solution**: Upgraded default secret to $\ge 32$ bytes and switched to timezone-aware `datetime.now(timezone.utc)`.
+
+---
+
+### Part 2: Biomarker Normalization Engine (`normalization.py`)
+
+- **Alias Mapping**: Created a dedicated module mapping lab-specific biomarker names to canonical names:
+  - `glucose_fasting`, `FBS`, `fbs` $\rightarrow$ `fasting_glucose`
+  - `A1c`, `a1c`, `HbA1C`, `hba1c` $\rightarrow$ `hba1c`
+  - `trigs` $\rightarrow$ `triglycerides`
+  - Canonical names map directly to themselves.
+- **Tolerance**: Case-insensitive and whitespace-tolerant matching (`raw_name.strip().lower()`).
+- **Safe Unknown Marker Handling**: Unknown biomarkers (e.g., `cholesterol_total`, `crp`) are safely ignored without crashing requests or corrupting scores.
+- **Pipeline Wiring**: Integrated into `PATCH /reports/{report_id}/readings` before saving into the stored report.
+
+---
+
+## Setup & Running
+
+### Installation
 ```bash
-pip install fastapi uvicorn pyjwt
-uvicorn main:app --reload
+pip install fastapi uvicorn pyjwt pytest
 ```
 
-Open http://127.0.0.1:8000/docs. Log in as `asha` / `asha123` or `ravi` / `ravi123` to get a token.
+### Run the API Server
+```bash
+python -m uvicorn main:app --reload
+```
+- Interactive Swagger Docs: http://127.0.0.1:8000/docs
+- Alternative ReDoc Docs: http://127.0.0.1:8000/redoc
+
+### Test Credentials
+- **Asha (Member)**: `asha` / `asha123`
+- **Ravi (Member)**: `ravi` / `ravi123`
+- **Dr. Mehta (Clinician)**: `dr_mehta` / `mehta123`
 
 ---
 
-## Part 1. Find what is wrong, fix it, and lock it down
+## Running the Automated Test Suite
 
-**1. Find what is wrong and fix it.**
+A comprehensive 47-test suite locks the score, verifies normalization, and checks security:
 
-There are security problems and at least one correctness problem in the scoring. We are not telling you how many. Fix what you find, and leave what you cannot fix. A clear note about a bug you spotted but ran out of time on scores better with us than a silent gap.
+```bash
+python -m pytest -v
+```
 
-**2. Write tests that lock the score.**
-
-The score is the product. If someone refactors the engine next year, a test should fail before a patient sees a wrong number. Add tests that would catch that. Use `pytest`.
-
----
-
-## Part 2. Build a small piece
-
-Real lab reports do not agree with each other. The same marker comes back under a different name depending on which lab produced the report, so the value is right but the engine does not recognise it and silently treats the marker as missing.
-
-Write a normalization helper that maps incoming marker names to the canonical names the engine expects, and wire it into the readings path so that scoring works correctly whichever alias arrives.
-
-Handle at least these:
-
-| Incoming name | Canonical name |
-|---|---|
-| `glucose_fasting` | `fasting_glucose` |
-| `FBS` | `fasting_glucose` |
-| `A1c` | `hba1c` |
-| `HbA1C` | `hba1c` |
-| `trigs` | `triglycerides` |
-
-An **unknown marker name must be ignored safely.** It should not crash the request, and it should not corrupt the score.
-
-Add tests for the helper, including the unknown-name case.
-
-This part should take about an hour. Honest and unfinished is fine here too, and we would rather see a clean partial helper with tests than a complete one with none.
+All 47 tests pass:
+- `tests/test_scoring.py`: Regression lock for `r_100`, missing marker checks, boundary math.
+- `tests/test_normalization.py`: Required aliases, whitespace/casing, unknown-name safety.
+- `tests/test_api.py`: Login credential hygiene, BOLA 403 checks, clinician access, verified report protection, input validation.
 
 ---
 
-## Scope
+## Detailed Audit Findings
 
-We are not looking for a rewrite. Do not swap frameworks, add a database, or build a front end. Beyond the fixes in Part 1 and the helper and wiring we asked for in Part 2, leave the shape of the service alone.
-
-## Write up what you found
-
-In `FINDINGS.md`, for each issue you fixed: what it was, why it matters, what you changed. Two or three sentences each is plenty. Add a short note on how you built the normalization helper and why you structured it the way you did.
-
-If you used AI tools at any point, say where. That is completely fine and we would rather know.
-
-## What we are looking for
-
-- Whether you can read unfamiliar code and spot what is wrong with it.
-- Whether you think about who is allowed to see what, not just whether the endpoint returns 200.
-- Whether the code you write yourself is clean and tested.
-- Whether your commits tell a story. **Push as you go, in small commits.** One commit at the end tells us nothing, and we do look.
-- Clear writing.
-
-## How to submit
-
-Push to a **public GitHub repository** and send us the link. Real commit history, please — that matters to us as much as the final state.
-
-Any questions at all, just email. Asking is not a mark against you.
+For an in-depth write-up of every issue, clinical domain observations, and transparent AI tool disclosure, see [FINDINGS.md](FINDINGS.md).
