@@ -1,4 +1,4 @@
-﻿# Findings & Technical Decisions
+# Findings & Technical Decisions
 
 This document summarizes all security and correctness issues identified and resolved in **Part 1**, details the architecture of the normalization helper in **Part 2**, highlights clinical domain observations, and provides transparent disclosure of AI tool usage as requested in the task guidelines.
 
@@ -16,7 +16,7 @@ This document summarizes all security and correctness issues identified and reso
 ### Issue 2: Broken Object-Level Authorization (BOLA / IDOR)
 * **What it was**: The endpoints `GET /reports/{id}`, `GET /reports/{id}/score`, and `PATCH /reports/{id}/readings` validated JWT tokens but never verified whether the authenticated user owned the requested report.
 * **Why it matters**: Any authenticated patient (e.g., Ravi) could read or tamper with another patient's (e.g., Asha's) sensitive diagnostic reports, constituting a critical Protected Health Information (PHI) breach.
-* **What was changed**: Implemented `get_authorized_report()` in `main.py`. Members are strictly restricted to reports where `report["owner_id"] == user["user_id"]` (returning `403 Forbidden` on mismatch), while clinicians (`dr_mehta`) retain elevated access to review any patient record.
+* **What was changed**: Implemented `get_authorized_report()` in `main.py`. Members are strictly restricted to reports where `report["owner_id"] == user["user_id"]`. To prevent report ID enumeration (information leakage), unauthorized access returns `404 Not Found` rather than `403 Forbidden`, making non-owned reports indistinguishable from non-existent ones. Clinicians (`dr_mehta`) retain elevated access to review any patient record.
 
 ---
 
@@ -44,7 +44,7 @@ This document summarizes all security and correctness issues identified and reso
 ### Issue 6: Missing Input Validation on `ReadingsUpdate`
 * **What it was**: `ReadingsUpdate` accepted arbitrary dictionaries without validating key or value types.
 * **Why it matters**: Submitting non-numeric types (`{"fasting_glucose": "elevated"}` or `None`) or negative numbers caused unhandled 500 server crashes inside the scoring engine.
-* **What was changed**: Added Pydantic field validation ensuring all reading values are non-negative numeric types (`int` or `float`), cleanly rejecting invalid payloads with `422 Unprocessable Entity`.
+* **What was changed**: Added Pydantic field validation ensuring all reading values are non-negative numeric types (`int` or `float`), cleanly rejecting invalid payloads with `422 Unprocessable Entity`. The same type/negative guards are also applied inside `compute_score()` and `normalize_readings()` as a conscious **defense-in-depth** strategy — if a future code path bypasses the Pydantic boundary, the downstream functions still reject bad data rather than crashing or producing silent corruption.
 
 ---
 

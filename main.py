@@ -107,8 +107,8 @@ def get_authorized_report(report_id: str, user: dict, write: bool = False) -> di
 
     if not (is_clinician or is_owner):
         raise HTTPException(
-            status_code=403,
-            detail="Forbidden: You do not have permission to access this report",
+            status_code=404,
+            detail="Not found",
         )
 
     if write and report.get("verified_by_clinician") and not is_clinician:

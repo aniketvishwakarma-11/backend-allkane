@@ -1,4 +1,4 @@
-﻿"""
+"""
 Integration tests for the API routes (main.py).
 
 Verifies authentication hygiene, BOLA/IDOR protection, clinician role elevation,
@@ -93,19 +93,18 @@ class TestObjectLevelAuthorization:
 
     def test_bola_patient_cannot_view_other_patient_report(self, client, ravi_headers):
         """
-        Ravi attempting to access Asha's report (r_100) must receive 403 Forbidden.
+        Ravi attempting to access Asha's report (r_100) must receive 404 Not Found.
+        Returns 404 instead of 403 to prevent report ID enumeration (info leakage).
         """
         response = client.get("/reports/r_100", headers=ravi_headers)
-        assert response.status_code == 403
-        assert "Forbidden" in response.json()["detail"]
+        assert response.status_code == 404
 
     def test_bola_patient_cannot_view_other_patient_score(self, client, ravi_headers):
         """
-        Ravi attempting to compute Asha's score (r_100/score) must receive 403 Forbidden.
+        Ravi attempting to compute Asha's score (r_100/score) must receive 404 Not Found.
         """
         response = client.get("/reports/r_100/score", headers=ravi_headers)
-        assert response.status_code == 403
-        assert "Forbidden" in response.json()["detail"]
+        assert response.status_code == 404
 
     def test_clinician_can_view_any_patient_report_and_score(self, client, dr_mehta_headers):
         """
@@ -180,3 +179,81 @@ class TestClinicalIntegrityAndNormalization:
         negative_payload = {"readings": {"fasting_glucose": -50}}
         response = client.patch("/reports/r_101/readings", json=negative_payload, headers=ravi_headers)
         assert response.status_code == 422
+
+    def test_bola_patient_cannot_patch_other_patient_report(self, client, ravi_headers):
+        """
+        Ravi attempting to PATCH Asha's report (r_100) must receive 404 Not Found.
+        Verifies BOLA protection on write operations, not just read.
+        """
+        payload = {"readings": {"fasting_glucose": 90}}
+        response = client.patch("/reports/r_100/readings", json=payload, headers=ravi_headers)
+        assert response.status_code == 404
+
+    def test_clinician_can_modify_verified_report(self, client, dr_mehta_headers):
+        """
+        A clinician (Dr. Mehta) must be able to update readings on clinician-verified
+        reports, unlike regular members who are blocked.
+        """
+        payload = {"readings": {"fasting_glucose": 88}}
+        response = client.patch("/reports/r_100/readings", json=payload, headers=dr_mehta_headers)
+        assert response.status_code == 200
+        assert response.json()["readings"]["fasting_glucose"] == 88
+
+    def test_expired_token_returns_401(self, client):
+        """
+        An expired JWT must be rejected with 401 Unauthorized.
+        """
+        import jwt as pyjwt
+        from datetime import datetime, timezone, timedelta
+        from main import SECRET_KEY, ALGORITHM
+
+        expired_token = pyjwt.encode(
+            {
+                "user_id": "u_001",
+                "role": "member",
+                "exp": datetime.now(timezone.utc) - timedelta(hours=1),
+            },
+            SECRET_KEY,
+            algorithm=ALGORITHM,
+        )
+        headers = {"Authorization": f"Bearer {expired_token}"}
+        response = client.get("/reports/r_100", headers=headers)
+        assert response.status_code == 401
+        assert response.json()["detail"] == "Invalid token"
+
+    def test_alias_conflict_last_write_wins(self, client, ravi_headers):
+        """
+        When both an alias and a canonical name for the same marker appear in
+        a single payload, the last-processed value wins (dict iteration order).
+        This test documents the expected behavior.
+        """
+        payload = {
+            "readings": {
+                "FBS": 90,
+                "fasting_glucose": 100,
+            }
+        }
+        response = client.patch("/reports/r_101/readings", json=payload, headers=ravi_headers)
+        assert response.status_code == 200
+        # Both map to fasting_glucose; last-write-wins per dict order
+        assert response.json()["readings"]["fasting_glucose"] == 100
+
+    def test_end_to_end_score_after_alias_normalization(self, client, ravi_headers):
+        """
+        End-to-end: PATCH with aliases, then GET score, assert correct total.
+        All three metabolic markers are in-range → metabolic pillar should be 280.0.
+        """
+        patch_payload = {
+            "readings": {
+                "FBS": 85,
+                "A1c": 5.0,
+                "trigs": 100,
+            }
+        }
+        patch_res = client.patch("/reports/r_101/readings", json=patch_payload, headers=ravi_headers)
+        assert patch_res.status_code == 200
+
+        score_res = client.get("/reports/r_101/score", headers=ravi_headers)
+        assert score_res.status_code == 200
+        score_data = score_res.json()
+        assert score_data["pillars"]["metabolic"] == 280.0
